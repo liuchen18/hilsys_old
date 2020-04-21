@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<launch>
+  <node name="fwx_move" pkg="fwx_control" type="move_fwx.py" output="screen">
+      <remap from="joint1_command" to="/joint1_controller/command"/>
+      <remap from="joint2_command" to="/joint2_controller/command"/>
+      <remap from="joint3_command" to="/joint3_controller/command"/>
+      <remap from="joint4_command" to="/joint4_controller/command"/>
+      <remap from="joint5_command" to="/joint5_controller/command"/>
+      <remap from="joint6_command" to="/joint6_controller/command"/>
+      <remap from="joint7_command" to="/joint7_controller/command"/>
+    </node>
+
+</launch>

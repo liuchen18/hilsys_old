@@ -1,0 +1,5 @@
+<?xml version="1.0" ?>
+<robot name="fwx" xmlns:xacro="http://wiki.ros.org/xacro">
+  <xacro:include filename="$(find fwx_control)/urdf/iiwa_agv.urdf.xacro"/>
+  <xacro:fwx prefix=""/>
+</robot>
