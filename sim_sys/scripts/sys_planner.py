@@ -4,11 +4,13 @@ import moveit_commander
 from moveit_commander import MoveGroupCommander
 from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest, GetPositionIKResponse
 from moveit_msgs.srv import GetPositionFK, GetPositionFKRequest, GetPositionFKResponse
-from moveit_msgs.msg import RobotState
+from moveit_msgs.msg import RobotState, RobotTrajectory
 import numpy as np
 import numpy.matlib
 from geometry_msgs.msg import Pose
 import math
+import copy
+
 
 
 class sys_class():
@@ -19,6 +21,12 @@ class sys_class():
         self.group = moveit_commander.MoveGroupCommander(self.group_name)
         self.compute_ik = rospy.ServiceProxy('compute_ik', GetPositionIK)
         self.compute_fk = rospy.ServiceProxy('compute_fk', GetPositionFK)
+        self.group.allow_replanning=True
+        self.group.set_pose_reference_frame('wx')
+        self.group.set_end_effector_link('pan_link')
+        self.group.set_goal_position_tolerance(0.001)
+        self.group.set_goal_orientation_tolerance(0.01)
+        self.group.set_max_velocity_scaling_factor(1)
     
     def compute_inverse_kinematics(self,end_effector_pose):
         '''
@@ -80,6 +88,31 @@ class sys_class():
             jacobian_matrix=np.asarray(jacobian_matrix_m)
             return jacobian_matrix
 
+    def compute_cartisian_trajectory(self,way_points):
+        '''compute the trajectory according to the compute cartisian path api.inputs are waypoints
+        '''
+        trajectory=RobotTrajectory()
+        attempts=0
+        max_attempts=10000
+        fraction=0
+        while fraction<1 and attempts<max_attempts:
+            trajectory,fraction=self.group.compute_cartesian_path(way_points,0.01,0)
+            attempts+=1
+            if attempts % 10 == 0:
+                rospy.loginfo('still trying to solve the path after %d appempts',attempts)
+        if fraction == 1:
+            rospy.loginfo('the cartisian trajectory computed')
+            return trajectory
+        else:
+            rospy.logerr('cannot solve the path 100%,only' +str(fraction*100)+'% planned')
+            exit()
+
+
+
+
+
+
+
 def quaternion_to_euler(given_oriantation):
     '''
     transfor the given orientation into the ruler angle,return R,P,Y
@@ -106,7 +139,7 @@ def euler_to_quaternion(R,P,Y):
 class trajectory_class():
     def __init__(self):
         self.omega=5/math.pi
-        self.period=30
+        self.period=10
     
     def desired_trajectory(self,time):
         '''
@@ -114,8 +147,8 @@ class trajectory_class():
         '''
         desired_pose=Pose()
         desired_pose.position.x=3
-        desired_pose.position.y=time*0.1+0.15
-        desired_pose.position.z=1
+        desired_pose.position.y=time*0.2+0.15
+        desired_pose.position.z=0.5+0.5*math.sin(time*2*math.pi/10)
         desired_pose.orientation.x=0.5
         desired_pose.orientation.y=0.5
         desired_pose.orientation.z=0.5
@@ -143,7 +176,7 @@ class planner_class():
         self.sys=sys_class()
         self.debug=False
         self.time_duration=0.5
-        self.total_time=10
+        self.total_time=10.0
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory.txt','w') as f:
             f.write('this is the MBX pose,the info is time,positionx,positiony,positionz,orientationw,orientationx,orientationy,orientationz'+'\r\n')
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/fwx_planned_trajectory.txt','w') as f:
@@ -156,7 +189,7 @@ class planner_class():
     
     def write_fwx_info(self,time,joint_value):
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/fwx_planned_trajectory.txt','a') as f:
-            f.write(str(time)+' '+str(joint_value[1]/2)+' '+str(joint_value[2]/2)+' '+str(joint_value[3]/2)+' '+str(joint_value[4])+\
+            f.write(str(time)+' '+str(-(3+joint_value[1]/2)/2)+' '+str(-joint_value[2]/2)+' '+str(-joint_value[3]/2)+' '+str(joint_value[4])+\
             ' '+str(joint_value[5])+' '+str(joint_value[6])+' '+str(joint_value[7])+' '+str(joint_value[8])+' '+str(joint_value[9])+\
             ' '+str(joint_value[10])+'\r\n')
 
@@ -166,31 +199,44 @@ class planner_class():
         '''
         nutation_pose=self.trajectory.nutation(time)
         wx_pose=Pose()
-        wx_pose.position.x=joint_values[1]/2
-        wx_pose.position.y=joint_values[2]/2
-        wx_pose.position.z=1 #this z value is NOT acurate. need to be confermed
+        wx_pose.position.x=(joint_values[1]+3)/2 #this means the x position of the car
+        wx_pose.position.y=joint_values[2]/2 #this means the y position of the car
+        wx_pose.position.z=1.36 #this z value is NOT acurate. need to be confermed
         R,P,Y=quaternion_to_euler(nutation_pose.orientation)
-        R+=joint_values[0]
-        Y+=joint_values[3]/2
-        wx_pose.orientation=euler_to_quaternion(R,P,Y)
-        return time,wx_pose
+        planned_pose=euler_to_quaternion(math.pi/2-joint_values[0],0,joint_values[3]/2)
+        # this means the multiply of the quaternion
+        wx_pose.orientation.w=nutation_pose.orientation.w*planned_pose.w-nutation_pose.orientation.x*planned_pose.x-nutation_pose.orientation.y*planned_pose.y-nutation_pose.orientation.z*planned_pose.z
+        wx_pose.orientation.x=nutation_pose.orientation.w*planned_pose.x+nutation_pose.orientation.x*planned_pose.w+nutation_pose.orientation.y*planned_pose.z-nutation_pose.orientation.z*planned_pose.y
+        wx_pose.orientation.y=nutation_pose.orientation.w*planned_pose.y-nutation_pose.orientation.x*planned_pose.z+nutation_pose.orientation.y*planned_pose.w+nutation_pose.orientation.z*planned_pose.x
+        wx_pose.orientation.z=nutation_pose.orientation.w*planned_pose.z+nutation_pose.orientation.x*planned_pose.y-nutation_pose.orientation.y*planned_pose.x+nutation_pose.orientation.z*planned_pose.w
+        #wx_pose.orientation=euler_to_quaternion(R,P,Y)
+        return wx_pose
     
     def plan(self):
         count=0
+        way_points=[]
+        rospy.loginfo('generate way points of the path')
         while count*self.time_duration < self.total_time:
             desired_pose=self.trajectory.desired_trajectory(count*self.time_duration)
-            joint_values=self.sys.compute_inverse_kinematics(desired_pose)
-            if self.debug:
-                print(joint_values)
-            if len(joint_values)>0:
-                time,wx_pose=self.add_nutation(joint_values,count*self.time_duration)
-                rospy.loginfo('writing trajectory')
-                self.write_mbx_info(time,wx_pose)
-                self.write_fwx_info(time,joint_values)
-                count+=1
-            else:
-                rospy.logerr('no IKsolution found. exit the program')
-                exit()
+            way_points.append(copy.deepcopy(desired_pose))
+            count+=1
+        rospy.loginfo('start planner')
+        trajectory=self.sys.compute_cartisian_trajectory(way_points)
+        #print(trajectory)
+        print('got '+str(len(trajectory.joint_trajectory.points))+'points totally')
+        temp_total_time=trajectory.joint_trajectory.points[-1].time_from_start.to_sec()-trajectory.joint_trajectory.points[1].time_from_start.to_sec()
+        print('origin total time: '+str(temp_total_time))
+        for i in range(1,len(trajectory.joint_trajectory.points)):
+            cur_point=trajectory.joint_trajectory.points[i]
+            time_from_start=cur_point.time_from_start.to_sec()-trajectory.joint_trajectory.points[1].time_from_start.to_sec()
+            new_time=time_from_start*self.total_time/temp_total_time
+            self.write_fwx_info(new_time,cur_point.positions)
+            wx_pose=self.add_nutation(cur_point.positions,new_time)
+            self.write_mbx_info(new_time,wx_pose)
+        rospy.loginfo('trajectory generated and writen into txt file')
+        #for i in range(10):
+        #    print(trajectory.joint_trajectory.points[i])
+
 
 
 
@@ -218,12 +264,10 @@ def main():
         print(e_pose)
 
     planner.plan()
-    rate=rospy.Rate(10)
-    while not rospy.is_shutdown():
 
-
-        rate.sleep()
 
 
 if __name__ == '__main__':
     main()
+    #debug_main()
+    
