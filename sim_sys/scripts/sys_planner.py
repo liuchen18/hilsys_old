@@ -175,17 +175,30 @@ class planner_class():
         self.trajectory=trajectory_class()
         self.sys=sys_class()
         self.debug=False
-        self.time_duration=0.5
-        self.total_time=10.0
+        self.time_duration=0.2 # add a point from the desired trajectory every time_duration
+        self.total_time=20.0 # total time of the trajectory
+
+        # init the txt files
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory.txt','w') as f:
             f.write('this is the MBX pose,the info is time,positionx,positiony,positionz,orientationw,orientationx,orientationy,orientationz'+'\r\n')
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/fwx_planned_trajectory.txt','w') as f:
             f.write('this is the FWX joint values,the following info is time,x,y,theta,joint1,joint2,joint3,joint4,joint5,joint6,joint7'+'\r\n')
+        with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory_no_n.txt','w') as f:
+            f.write('this is the origin planned trajectory without nutation')
+        with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory_nutation.txt','w') as f:
+            f.write('this is the nutation of wx, only')
+
     
-    def write_mbx_info(self,time,pose):
+    def write_mbx_info(self,time,pose,planned_pose,nutation_pose):
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory.txt','a') as f:
             f.write(str(time)+' '+str(pose.position.x)+' '+str(pose.position.y)+' '+str(pose.position.z)+' '+str(pose.orientation.w)+\
             ' '+str(pose.orientation.x)+' '+str(pose.orientation.y)+' '+str(pose.orientation.z)+'\r\n')
+        with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory_no_n.txt','a') as f:
+            f.write(str(time)+' '+str(pose.position.x)+' '+str(pose.position.y)+' '+str(pose.position.z)+' '+str(planned_pose.w)+\
+            ' '+str(planned_pose.x)+' '+str(planned_pose.y)+' '+str(planned_pose.z)+'\r\n')
+        with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/mbx_planned_trajectory_nutation.txt','a') as f:
+            f.write(str(time)+' '+str(nutation_pose.position.x)+' '+str(nutation_pose.position.y)+' '+str(nutation_pose.position.z)+' '+str(nutation_pose.orientation.w)+\
+            ' '+str(nutation_pose.orientation.x)+' '+str(nutation_pose.orientation.y)+' '+str(nutation_pose.orientation.z)+'\r\n')
     
     def write_fwx_info(self,time,joint_value):
         with open('/home/chen/ws_chen/src/hilsys/sim_sys/data/fwx_planned_trajectory.txt','a') as f:
@@ -198,21 +211,25 @@ class planner_class():
         this function generate the movement of wx with nutation according to the joint values and nutation function. return time and pose
         '''
         nutation_pose=self.trajectory.nutation(time)
+        nutation_pose.position.z=1.36
         wx_pose=Pose()
         wx_pose.position.x=(joint_values[1]+3)/2 #this means the x position of the car
         wx_pose.position.y=joint_values[2]/2 #this means the y position of the car
         wx_pose.position.z=1.36 #this z value is NOT acurate. need to be confermed
         R,P,Y=quaternion_to_euler(nutation_pose.orientation)
-        planned_pose=euler_to_quaternion(math.pi/2-joint_values[0],0,joint_values[3]/2)
-        # this means the multiply of the quaternion
+        planned_pose=euler_to_quaternion(-math.pi/2+joint_values[0],0,joint_values[3]/2)
+
+        # this is the multiply of the quaternion
         wx_pose.orientation.w=nutation_pose.orientation.w*planned_pose.w-nutation_pose.orientation.x*planned_pose.x-nutation_pose.orientation.y*planned_pose.y-nutation_pose.orientation.z*planned_pose.z
         wx_pose.orientation.x=nutation_pose.orientation.w*planned_pose.x+nutation_pose.orientation.x*planned_pose.w+nutation_pose.orientation.y*planned_pose.z-nutation_pose.orientation.z*planned_pose.y
         wx_pose.orientation.y=nutation_pose.orientation.w*planned_pose.y-nutation_pose.orientation.x*planned_pose.z+nutation_pose.orientation.y*planned_pose.w+nutation_pose.orientation.z*planned_pose.x
         wx_pose.orientation.z=nutation_pose.orientation.w*planned_pose.z+nutation_pose.orientation.x*planned_pose.y-nutation_pose.orientation.y*planned_pose.x+nutation_pose.orientation.z*planned_pose.w
         #wx_pose.orientation=euler_to_quaternion(R,P,Y)
-        return wx_pose
+        return wx_pose,planned_pose,nutation_pose
     
     def plan(self):
+        '''get point from trajectory_class and compute the whole path. the result will be witten into txt file
+        '''
         count=0
         way_points=[]
         rospy.loginfo('generate way points of the path')
@@ -224,15 +241,31 @@ class planner_class():
         trajectory=self.sys.compute_cartisian_trajectory(way_points)
         #print(trajectory)
         print('got '+str(len(trajectory.joint_trajectory.points))+'points totally')
-        temp_total_time=trajectory.joint_trajectory.points[-1].time_from_start.to_sec()-trajectory.joint_trajectory.points[1].time_from_start.to_sec()
+
+        #find the joint values that the end effector reaches the first given point
+        first_point_num=0
+        init_pose=self.trajectory.desired_trajectory(0)
+        total_error=float('inf')
+        goal_link='pan_link'
+        while total_error > 0.001 or total_error < -0.001:
+            computed_end_effector_posestamped=self.sys.compute_forward_kinematics(trajectory.joint_trajectory.points[first_point_num].positions,goal_link)
+            computed_end_effector_pose=computed_end_effector_posestamped.pose
+            total_error=init_pose.position.x-computed_end_effector_pose.position.x+init_pose.position.y-computed_end_effector_pose.position.y+init_pose.position.z-computed_end_effector_pose.position.z
+            first_point_num+=1
+        
+        #according to the firet point num, recompute time 
+        temp_total_time=trajectory.joint_trajectory.points[-1].time_from_start.to_sec()-trajectory.joint_trajectory.points[first_point_num].time_from_start.to_sec()
         print('origin total time: '+str(temp_total_time))
-        for i in range(1,len(trajectory.joint_trajectory.points)):
+        print('first_point_num: '+str(first_point_num))
+        for i in range(first_point_num,len(trajectory.joint_trajectory.points)):
             cur_point=trajectory.joint_trajectory.points[i]
-            time_from_start=cur_point.time_from_start.to_sec()-trajectory.joint_trajectory.points[1].time_from_start.to_sec()
+            time_from_start=cur_point.time_from_start.to_sec()-trajectory.joint_trajectory.points[first_point_num].time_from_start.to_sec()
             new_time=time_from_start*self.total_time/temp_total_time
             self.write_fwx_info(new_time,cur_point.positions)
-            wx_pose=self.add_nutation(cur_point.positions,new_time)
-            self.write_mbx_info(new_time,wx_pose)
+
+            #compute the mbx trajectory
+            wx_pose,planned_pose,nutation_pose=self.add_nutation(cur_point.positions,new_time)
+            self.write_mbx_info(new_time,wx_pose,planned_pose,nutation_pose)
         rospy.loginfo('trajectory generated and writen into txt file')
         #for i in range(10):
         #    print(trajectory.joint_trajectory.points[i])
